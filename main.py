@@ -2135,8 +2135,6 @@ class FunFernusBot(commands.Bot):
             try:
                 self.realtime_server = await setup_realtime_server()
                 self.realtime_error = None
-                if self.website_bridge is not None and hasattr(self.realtime_server, "set_outbox_wakeup"):
-                    self.realtime_server.set_outbox_wakeup(self.website_bridge.drain_outbox)
             except Exception as exc:
                 # Realtime не должен уронить Discord-бота целиком.
                 self.realtime_server = None
@@ -2416,9 +2414,16 @@ async def rcon_console(interaction: discord.Interaction) -> None:
 )
 @app_commands.guild_only()
 async def rcon_test(interaction: discord.Interaction) -> None:
-    if not await require_staff(interaction):
+    # Acknowledge immediately: Discord invalidates an interaction that is not
+    # acknowledged quickly enough. Permission/RCON work happens afterwards.
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+    except discord.NotFound:
+        log.warning("RCON test interaction expired before acknowledgement: user=%s", interaction.user.id)
         return
-    await interaction.response.defer(ephemeral=True)
+    if not is_staff(interaction):
+        await interaction.followup.send(no_access_text(interaction), ephemeral=True)
+        return
     ok, response = await run_rcon("list")
     await interaction.followup.send(
         ("✅" if ok else "❌") + f" **RCON**\n```{response[:1800]}```",
