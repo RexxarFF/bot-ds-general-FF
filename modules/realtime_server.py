@@ -163,6 +163,7 @@ class FunFernusRealtimeServer:
         self._site: web.BaseSite | None = None
         self._started = False
         self._stopping = False
+        self._owns_runner = False
 
     @property
     def enabled(self) -> bool:
@@ -431,6 +432,34 @@ class FunFernusRealtimeServer:
         delivered = await self._fanout(payload.get("recipients"), packet)
         return web.json_response({"ok": True, "delivered_sockets": delivered}, headers={"Cache-Control": "no-store"})
 
+
+    def attach_to_app(self, app: web.Application) -> "FunFernusRealtimeServer":
+        """Attach realtime routes to an existing aiohttp application.
+
+        This is the preferred Bothost mode: one process owns the public PORT,
+        so Discord and WebSocket do not compete for the same socket.
+        """
+        if not self.enabled:
+            log.info("Realtime отключён (REALTIME_ENABLED=false)")
+            return self
+        if self._started:
+            return self
+        app.router.add_get("/", self._health)
+        app.router.add_get("/health", self._health)
+        app.router.add_get(self.config.path, self._websocket)
+        app.router.add_post("/internal/publish", self._internal_publish)
+        self._app = app
+        self._runner = None
+        self._site = None
+        self._owns_runner = False
+        self._started = True
+        log.info(
+            "FunFernus Realtime routes attached to shared HTTP server: %s | origins=%s",
+            self.config.path,
+            ", ".join(self.config.allowed_origins) or "ANY (не рекомендуется для production)",
+        )
+        return self
+
     async def start(self) -> "FunFernusRealtimeServer":
         if not self.enabled:
             log.info("Realtime отключён (REALTIME_ENABLED=false)")
@@ -456,6 +485,7 @@ class FunFernusRealtimeServer:
         self._app = app
         self._runner = runner
         self._site = site
+        self._owns_runner = True
         self._started = True
         log.info(
             "FunFernus Realtime запущен внутри Discord-бота: http://%s:%s%s | origins=%s",
@@ -479,13 +509,14 @@ class FunFernusRealtimeServer:
                     except Exception:
                         pass
             self._connections_by_user.clear()
-            if self._runner is not None:
+            if self._owns_runner and self._runner is not None:
                 await self._runner.cleanup()
         finally:
             self._app = None
             self._runner = None
             self._site = None
             self._started = False
+            self._owns_runner = False
             self._stopping = False
             log.info("FunFernus Realtime остановлен")
 

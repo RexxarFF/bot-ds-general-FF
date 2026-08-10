@@ -1,0 +1,10 @@
+FunFernus BOTHOST V4
+- Устранён двойной bind одного PORT.
+- aiohttp HTTP/WebSocket теперь живёт в main.py как единый web app.
+- Discord запускается asyncio-задачей внутри того же процесса.
+- realtime_server умеет attach_to_app() без создания второго TCP listener.
+- setup_hook не запускает второй realtime listener, если routes уже attached.
+- Сохранён импорт publish_city_panels.
+- Один общий .env.example.
+- Готовые Bothost URL уже прописаны.
+- Dockerfile убран из основной сборки, чтобы Bothost корректно распознал собственный HTTP server.

@@ -12,6 +12,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+from aiohttp import web
 
 import config
 from rcon_client import RCONError, execute_rcon_command
@@ -30,7 +31,7 @@ from modules.government import (
 )
 from modules.cities import setup_cities, publish_city_panels
 from modules.website_bridge import setup_website_bridge
-from modules.realtime_server import setup_realtime_server, validate_realtime_settings
+from modules.realtime_server import FunFernusRealtimeServer, setup_realtime_server, validate_realtime_settings
 
 
 # ============================================================
@@ -2125,27 +2126,20 @@ class FunFernusBot(commands.Bot):
         await setup_government(self, self.unified_store, ADMIN_USER_IDS)
         await setup_cities(self, self.unified_store, ADMIN_USER_IDS)
         self.website_bridge = await setup_website_bridge(self, self.unified_store, ADMIN_USER_IDS, run_rcon)
-        try:
-            self.realtime_server = await setup_realtime_server()
+        # На Bothost realtime может быть уже прикреплён к общему aiohttp-приложению
+        # ДО запуска Discord. Тогда второй listener создавать нельзя.
+        if self.realtime_server is not None and getattr(self.realtime_server, "started", False):
             self.realtime_error = None
-        except OSError as exc:
-            self.realtime_server = None
-            self.realtime_error = f"{type(exc).__name__}: {exc}"
-            if getattr(exc, "errno", None) == 98:
-                log.error(
-                    "Realtime не запущен: web-порт уже занят. На Bothost это означает, "
-                    "что проект запущен через платформенный HTTP-wrapper. Включи "
-                    "«Использовать собственный Dockerfile» — тогда один main.py сам "
-                    "займёт PORT и одновременно запустит Discord + WebSocket. "
-                    "Discord-бот продолжит работу без realtime."
-                )
-            else:
+            log.info("Realtime уже подключён к общему HTTP-серверу; второй порт не создаётся")
+        else:
+            try:
+                self.realtime_server = await setup_realtime_server()
+                self.realtime_error = None
+            except Exception as exc:
+                # Realtime не должен уронить Discord-бота целиком.
+                self.realtime_server = None
+                self.realtime_error = f"{type(exc).__name__}: {exc}"
                 log.exception("Realtime не запущен, Discord-бот продолжает запуск: %s", exc)
-        except Exception as exc:
-            # Realtime не должен уронить Discord-бота целиком.
-            self.realtime_server = None
-            self.realtime_error = f"{type(exc).__name__}: {exc}"
-            log.exception("Realtime не запущен, Discord-бот продолжает запуск: %s", exc)
 
         if GUILD_ID:
             guild_object = discord.Object(id=GUILD_ID)
@@ -2543,6 +2537,66 @@ def validate_settings() -> None:
         raise RuntimeError("\n".join(f"- {error}" for error in errors))
 
 
-if __name__ == "__main__":
+async def _bothost_startup(app: web.Application) -> None:
     validate_settings()
-    bot.run(DISCORD_TOKEN, log_handler=None)
+    realtime: FunFernusRealtimeServer = app["realtime_server"]
+    bot.realtime_server = realtime
+    bot.realtime_error = None
+
+    async def _run_discord() -> None:
+        try:
+            await bot.start(DISCORD_TOKEN, reconnect=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Discord-бот аварийно завершился")
+            raise
+
+    task = asyncio.create_task(_run_discord(), name="funfernus-discord")
+    app["discord_task"] = task
+
+    def _done(done: asyncio.Task) -> None:
+        if done.cancelled():
+            return
+        exc = done.exception()
+        if exc is not None:
+            log.error("Discord task завершился с ошибкой: %s", exc)
+
+    task.add_done_callback(_done)
+    log.info("Discord-бот запускается в том же процессе, что и HTTP/WebSocket")
+
+
+async def _bothost_cleanup(app: web.Application) -> None:
+    task = app.get("discord_task")
+    if not bot.is_closed():
+        await bot.close()
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+def create_bothost_app(*, start_discord: bool = True) -> web.Application:
+    """One-port app for Bothost: HTTP + WebSocket + Discord in one process."""
+    validate_settings()
+    realtime = FunFernusRealtimeServer()
+    app = web.Application(client_max_size=realtime.MAX_INTERNAL_BODY)
+    realtime.attach_to_app(app)
+    app["realtime_server"] = realtime
+    bot.realtime_server = realtime
+    bot.realtime_error = None
+    if start_discord:
+        app.on_startup.append(_bothost_startup)
+        app.on_cleanup.append(_bothost_cleanup)
+    return app
+
+
+if __name__ == "__main__":
+    # ВАЖНО для Bothost: только ОДИН HTTP listener занимает PORT.
+    # Discord запускается фоновой asyncio-задачей внутри того же процесса.
+    app = create_bothost_app(start_discord=True)
+    cfg = app["realtime_server"].config
+    log.info("Единый HTTP/WebSocket сервер запускается на %s:%s", cfg.host, cfg.port)
+    web.run_app(app, host=cfg.host, port=cfg.port, access_log=None, print=None)
