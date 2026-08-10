@@ -1,0 +1,17 @@
+<?php
+// Place as: /private/funfernus/realtime.php
+// The secret MUST be identical to REALTIME_SECRET in the Discord bot .env.
+return [
+    'enabled' => true,
+    'public_url' => 'wss://realtime.funfernus.ru/ws',
+
+    // If PHP website and Discord bot are on the SAME VPS:
+    // 'internal_url' => 'http://127.0.0.1:3099/internal/publish',
+
+    // If the website and Discord bot are on DIFFERENT servers:
+    'internal_url' => 'https://realtime.funfernus.ru/internal/publish',
+
+    'secret' => 'PASTE_THE_SAME_REALTIME_SECRET_HERE',
+    'ticket_ttl' => 120,
+    'publish_timeout_ms' => 700,
+];

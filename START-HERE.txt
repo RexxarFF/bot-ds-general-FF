@@ -1,0 +1,11 @@
+FUNFERNUS BOTHOST — НАЧНИ ОТСЮДА
+
+1) Открой BOTHOST-INSTALL-RU.md.
+2) Переименуй BOTHOST-READY.env -> .env.
+3) Заполни DISCORD_TOKEN, GUILD_ID, CONFIG_CHANNEL_ID, ADMIN_USER_IDS и WEB_DB_*.
+4) Включи домен/web interface в Bothost.
+5) Замени YOUR-SUBDOMAIN в .env и realtime.php.bothost.ready.
+6) Положи realtime.php.bothost.ready на сайт как /private/funfernus/realtime.php.
+7) Запуск: python main.py
+8) Проверь https://YOUR-SUBDOMAIN.bothost.tech/health
+9) В Discord: /realtime_status

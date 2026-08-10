@@ -1,0 +1,39 @@
+# Example HTTPS/WSS proxy for the realtime server embedded in FunFernus Discord Bot.
+# Assumes the bot listens on 127.0.0.1:3099.
+
+server {
+    listen 443 ssl http2;
+    server_name realtime.funfernus.ru;
+
+    # Configure your existing SSL certificate here.
+    ssl_certificate     /etc/letsencrypt/live/realtime.funfernus.ru/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/realtime.funfernus.ru/privkey.pem;
+
+    location /ws {
+        proxy_pass http://127.0.0.1:3099;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 75s;
+        proxy_send_timeout 75s;
+        proxy_buffering off;
+    }
+
+    location = /internal/publish {
+        proxy_pass http://127.0.0.1:3099/internal/publish;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_request_buffering off;
+    }
+
+    location = /health {
+        proxy_pass http://127.0.0.1:3099/health;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+    }
+}
