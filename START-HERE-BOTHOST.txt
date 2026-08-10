@@ -1,0 +1,41 @@
+FUNFERNUS BOT — BOTHOST V3
+
+ВАЖНО: по твоим логам Bothost запускает собственный Uvicorn wrapper на PORT=3000.
+Из-за этого второй aiohttp WebSocket не может занять тот же порт.
+
+При СОЗДАНИИ/ПЕРЕСОЗДАНИИ бота в Bothost:
+1) Использовать домен: ВКЛ
+2) Порт веб-приложения: 3000
+3) Кастомный домен: funfernus-realtime
+4) Главный файл: main.py
+5) Использовать собственный Dockerfile: ВКЛ (ОБЯЗАТЕЛЬНО)
+
+После деплоя правильный лог НЕ должен содержать строку:
+  Uvicorn running on http://0.0.0.0:3000
+до запуска main.py.
+Вместо этого main.py сам поднимет aiohttp realtime на PORT=3000 и Discord bot.
+
+Переменные:
+- используй содержимое .env.example как один общий набор переменных Bothost;
+- секрет REALTIME_SECRET уже согласован с приложенным realtime.php;
+- заполни DISCORD_TOKEN, WEB_DB_USER, WEB_DB_PASSWORD, RCON_HOST, RCON_PASSWORD.
+
+Сайт:
+- положи realtime.php в приватный конфиг сайта вместо старого realtime.php.
+
+Проверки после запуска:
+https://funfernus-realtime.bothost.tech/health
+wss://funfernus-realtime.bothost.tech/ws
+
+В логах должны быть:
+- Website bridge enabled
+- FunFernus Realtime запущен внутри Discord-бота
+- Shard ID ... connected to Gateway
+- FUNFERNUS DISCORD BOT ЗАПУЩЕН
+
+Исправлено в V3:
+- publish_city_panels импортирован корректно (NameError устранён);
+- конфликт порта теперь логируется понятным сообщением и не валит Discord;
+- один общий .env.example;
+- убраны старые Procfile/start/runtime/realtime-конфиги, чтобы не было путаницы;
+- готовые ссылки funfernus-realtime.bothost.tech уже прописаны.

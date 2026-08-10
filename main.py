@@ -28,7 +28,7 @@ from modules.government import (
     publish_government_panel,
     GovernmentSetupView,
 )
-from modules.cities import setup_cities
+from modules.cities import setup_cities, publish_city_panels
 from modules.website_bridge import setup_website_bridge
 from modules.realtime_server import setup_realtime_server, validate_realtime_settings
 
@@ -2128,11 +2128,21 @@ class FunFernusBot(commands.Bot):
         try:
             self.realtime_server = await setup_realtime_server()
             self.realtime_error = None
+        except OSError as exc:
+            self.realtime_server = None
+            self.realtime_error = f"{type(exc).__name__}: {exc}"
+            if getattr(exc, "errno", None) == 98:
+                log.error(
+                    "Realtime не запущен: web-порт уже занят. На Bothost это означает, "
+                    "что проект запущен через платформенный HTTP-wrapper. Включи "
+                    "«Использовать собственный Dockerfile» — тогда один main.py сам "
+                    "займёт PORT и одновременно запустит Discord + WebSocket. "
+                    "Discord-бот продолжит работу без realtime."
+                )
+            else:
+                log.exception("Realtime не запущен, Discord-бот продолжает запуск: %s", exc)
         except Exception as exc:
             # Realtime не должен уронить Discord-бота целиком.
-            # На Bothost это особенно важно: при неверной сетевой настройке
-            # бот всё равно войдёт в Discord, а ошибка будет видна в логах
-            # и /realtime_status.
             self.realtime_server = None
             self.realtime_error = f"{type(exc).__name__}: {exc}"
             log.exception("Realtime не запущен, Discord-бот продолжает запуск: %s", exc)
