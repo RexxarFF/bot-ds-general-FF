@@ -1,0 +1,30 @@
+FUNFERNUS BOT + REALTIME — BOTHOST
+=================================
+
+ПОЧЕМУ СТАРАЯ ВЕРСИЯ ПАДАЛА
+Bothost при обычной автосборке с включённым доменом поднимал свой Uvicorn на 0.0.0.0:8000.
+Наш aiohttp realtime тоже пытался занять 0.0.0.0:8000 => Errno 98 address already in use.
+Из-за исключения в setup_hook Discord-клиент не успевал войти в Discord, поэтому бот был offline.
+
+КАК СТАВИТЬ ЭТУ ВЕРСИЮ
+1) Загрузи содержимое архива в репозиторий/файлы нового бота.
+2) При создании/редактировании Bothost:
+   - Использовать домен: ВКЛ
+   - Порт веб-приложения: 8000
+   - Кастомный домен: funfernus-realtime (или уже созданный домен)
+   - Использовать собственный Dockerfile: ВКЛ ОБЯЗАТЕЛЬНО
+   - Главный файл можно оставить main.py; Dockerfile запускает python main.py сам.
+3) Заполни ОДИН файл .env или перенеси те же переменные в вкладку «Переменные» Bothost.
+4) В REALTIME_SECRET укажи длинный случайный секрет >=32 символов.
+5) Тот же secret вставь на сайте в realtime.php.
+6) Запусти/пересобери бота.
+
+ПРОВЕРКИ
+Discord: бот должен стать Online.
+HTTP: https://funfernus-realtime.bothost.tech/health
+WebSocket: wss://funfernus-realtime.bothost.tech/ws
+В Discord: /realtime_status
+
+ВАЖНО
+- В коде поддерживаются DISCORD_TOKEN и BOT_TOKEN. Если Bothost сам передаёт токен как BOT_TOKEN, бот его подхватит.
+- Realtime-ошибка больше НЕ валит Discord-бота целиком: бот продолжит вход в Discord и запишет причину в лог.

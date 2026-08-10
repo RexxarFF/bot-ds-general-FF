@@ -1,0 +1,9 @@
+FunFernus Bothost V2
+- Исправлен критический Errno 98 / port 8000 collision.
+- Добавлен Dockerfile для прямого запуска python main.py.
+- Ошибка realtime больше не валит Discord-клиент.
+- Токен читается из DISCORD_TOKEN, BOT_TOKEN или TOKEN.
+- Оставлен один общий .env.
+- В .env уже вставлена готовая WSS-ссылка Bothost.
+- Добавлен готовый realtime.php для сайта.
+- Добавлен PyNaCl.

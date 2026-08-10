@@ -1,0 +1,26 @@
+FunFernus Bothost V2 build checks
+================================
+
+Root cause fixed:
+- Previous Bothost domain mode had Uvicorn on 0.0.0.0:8000.
+- Embedded aiohttp realtime also tried 0.0.0.0:8000.
+- Result: OSError [Errno 98] address already in use in setup_hook.
+- Discord login never completed, so bot stayed offline.
+
+V2:
+- Dockerfile added: platform should use project process directly.
+- Single listener in app: aiohttp realtime on PORT/8000.
+- Discord bot + realtime share one Python process/event loop.
+- Realtime startup failure no longer kills Discord login.
+- DISCORD_TOKEN / BOT_TOKEN / TOKEN aliases supported.
+- One .env only.
+- Ready Bothost URLs embedded.
+- PyNaCl added.
+
+Checks:
+- python compileall: OK
+- AST parse all Python files: OK
+- realtime /health smoke test: HTTP 200 OK
+- .env files in root: exactly 1 (.env)
+- public WSS: wss://funfernus-realtime.bothost.tech/ws
+- internal publish: https://funfernus-realtime.bothost.tech/internal/publish

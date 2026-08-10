@@ -70,7 +70,7 @@ def parse_user_ids(raw: str) -> set[int]:
     }
 
 
-DISCORD_TOKEN = env_str("DISCORD_TOKEN")
+DISCORD_TOKEN = env_str("DISCORD_TOKEN") or env_str("BOT_TOKEN") or env_str("TOKEN")
 GUILD_ID = env_int("GUILD_ID")
 
 # Единственный канал, который указывается вручную.
@@ -2115,6 +2115,7 @@ class FunFernusBot(commands.Bot):
         self._loaded_guilds: set[int] = set()
         self.unified_store = UnifiedDiscordStore(self, CONFIG_CHANNEL_ID)
         self.realtime_server = None
+        self.realtime_error = None
 
     async def setup_hook(self) -> None:
         self.add_view(ApplicationPanelView(self))
@@ -2124,7 +2125,17 @@ class FunFernusBot(commands.Bot):
         await setup_government(self, self.unified_store, ADMIN_USER_IDS)
         await setup_cities(self, self.unified_store, ADMIN_USER_IDS)
         self.website_bridge = await setup_website_bridge(self, self.unified_store, ADMIN_USER_IDS, run_rcon)
-        self.realtime_server = await setup_realtime_server()
+        try:
+            self.realtime_server = await setup_realtime_server()
+            self.realtime_error = None
+        except Exception as exc:
+            # Realtime не должен уронить Discord-бота целиком.
+            # На Bothost это особенно важно: при неверной сетевой настройке
+            # бот всё равно войдёт в Discord, а ошибка будет видна в логах
+            # и /realtime_status.
+            self.realtime_server = None
+            self.realtime_error = f"{type(exc).__name__}: {exc}"
+            log.exception("Realtime не запущен, Discord-бот продолжает запуск: %s", exc)
 
         if GUILD_ID:
             guild_object = discord.Object(id=GUILD_ID)
@@ -2509,7 +2520,7 @@ def validate_settings() -> None:
         )
 
     if not DISCORD_TOKEN:
-        errors.append("Не указан DISCORD_TOKEN.")
+        errors.append("Не указан токен Discord. Укажи DISCORD_TOKEN (или BOT_TOKEN из панели Bothost).")
     if not GUILD_ID:
         log.warning(
             "GUILD_ID не указан. Глобальные slash-команды могут появиться не сразу."
