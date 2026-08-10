@@ -2135,6 +2135,8 @@ class FunFernusBot(commands.Bot):
             try:
                 self.realtime_server = await setup_realtime_server()
                 self.realtime_error = None
+                if self.website_bridge is not None and hasattr(self.realtime_server, "set_outbox_wakeup"):
+                    self.realtime_server.set_outbox_wakeup(self.website_bridge.drain_outbox)
             except Exception as exc:
                 # Realtime не должен уронить Discord-бота целиком.
                 self.realtime_server = None

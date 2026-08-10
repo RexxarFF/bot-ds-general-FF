@@ -2,7 +2,8 @@
 // FunFernus Site -> Bothost realtime
 // ВАЖНО: secret должен в точности совпадать с REALTIME_SECRET из .env бота.
 return [
-    'public_url' => 'wss://funfernus-realtime.bothost.tech/ws',
-    'internal_url' => 'https://funfernus-realtime.bothost.tech/internal/publish',
-    'secret' => 'LTUws38M0UiosPiH8ZSLE6eVV5xzSoRCSX0ZRPvRWJutu95aw-uByouRdWydWoHG',
+    'enabled' => true,
+    'public_url' => 'wss://YOUR-SUBDOMAIN.bothost.tech/ws',
+    'internal_url' => 'https://YOUR-SUBDOMAIN.bothost.tech/internal/publish',
+    'secret' => 'PASTE_THE_SAME_NEW_REALTIME_SECRET_HERE',
 ];

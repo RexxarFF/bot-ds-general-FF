@@ -283,8 +283,8 @@ class WebsiteDatabase:
                         result = f"Город «{name}» создан и синхронизируется с Minecraft."
 
                     elif app_type == "business":
-                        # Сайт создаёт бизнес сразу в статусе pending и списывает 192 АР.
-                        # При одобрении мы активируем ЭТУ ЖЕ запись, а не создаём дубль.
+                        # Сайт создаёт бизнес сразу в status=pending и сам получает актуальную цену с backend.
+                        # При одобрении активируем ЭТУ ЖЕ запись, не создавая дубль и не пересчитывая деньги в Discord.
                         business_id = int(payload.get("business_id") or 0)
                         name = str(payload.get("entity_name") or row["title"] or "Новый бизнес").strip()[:100]
                         description = str(payload.get("description") or "").strip()[:1000]
@@ -375,7 +375,7 @@ class WebsiteDatabase:
                             )
                         if fee_account_id > 0 and fee_amount > 0:
                             cur.execute(
-                                "SELECT id,balance FROM bank_accounts WHERE id=%s AND owner_user_id=%s FOR UPDATE",
+                                "SELECT id,balance,account_number FROM bank_accounts WHERE id=%s AND owner_user_id=%s FOR UPDATE",
                                 (fee_account_id, row["user_id"]),
                             )
                             account = cur.fetchone()
@@ -392,7 +392,7 @@ class WebsiteDatabase:
                                 if cur.rowcount != 1:
                                     cur.execute("UPDATE bank_accounts SET balance=balance-%s WHERE id=%s", (fee_amount, fee_account_id))
                                 else:
-                                    extra_note = f"  Возвращено {fee_amount} АР на основной счёт."
+                                    extra_note = f"  Возвращено {fee_amount} АР на счёт {account.get('account_number') or fee_account_id}."
                     cur.execute(
                         "UPDATE applications SET status='rejected',review_comment=%s,reviewed_by_discord_id=%s,reviewed_at=UTC_TIMESTAMP() WHERE id=%s",
                         (reason, str(reviewer_id), app_id),
@@ -475,10 +475,10 @@ class WebsiteDatabase:
                 )
             conn.commit()
 
-    def add_staff_support_message(self, thread_id: int, discord_id: int, body: str) -> tuple[bool, int, int]:
+    def add_staff_support_message(self, thread_id: int, discord_id: int, body: str) -> dict[str, Any] | None:
         body = body.strip()[:8000]
         if not body:
-            return False, 0, 0
+            return None
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -486,28 +486,43 @@ class WebsiteDatabase:
                     (str(thread_id),),
                 )
                 ticket = cur.fetchone()
-                if not ticket or ticket["status"] == "closed":
-                    conn.rollback(); return False, 0, 0
+                if not ticket or ticket["status"] in {"resolved", "closed"}:
+                    conn.rollback()
+                    return None
                 cur.execute(
                     "INSERT INTO support_messages(ticket_id,sender_type,sender_discord_id,body) VALUES(%s,'staff',%s,%s)",
                     (ticket["id"], str(discord_id), body),
                 )
-                cur.execute("UPDATE support_tickets SET status='waiting_user' WHERE id=%s", (ticket["id"],))
+                message_id = int(cur.lastrowid)
+                cur.execute("UPDATE support_tickets SET status='waiting_user',updated_at=UTC_TIMESTAMP() WHERE id=%s", (ticket["id"],))
                 cur.execute(
                     "INSERT INTO notifications(user_id,notification_type,title,body,link_url) "
                     "VALUES(%s,'support','Новый ответ техподдержки',%s,%s)",
-                    (ticket["user_id"], body[:900], f"/support.php?ticket={ticket['id']}"),
+                    (ticket["user_id"], body[:900], f"/profile.php?panel=support&ticket={ticket['id']}"),
                 )
             conn.commit()
-            return True, int(ticket["id"]), int(ticket["ticket_number"])
+            return {
+                "ticket_id": int(ticket["id"]),
+                "ticket_number": int(ticket["ticket_number"]),
+                "user_id": int(ticket["user_id"]),
+                "message_id": message_id,
+                "body": body,
+                "status": "waiting_user",
+            }
 
-    def set_support_status(self, ticket_id: int, status: str) -> None:
+    def set_support_status(self, ticket_id: int, status: str) -> dict[str, Any] | None:
         if status not in {"waiting_staff", "waiting_user", "in_progress", "resolved", "closed"}:
-            return
+            return None
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE support_tickets SET status=%s WHERE id=%s", (status, ticket_id))
+                cur.execute("SELECT id,user_id,ticket_number FROM support_tickets WHERE id=%s LIMIT 1", (ticket_id,))
+                ticket = cur.fetchone()
+                if not ticket:
+                    conn.rollback()
+                    return None
+                cur.execute("UPDATE support_tickets SET status=%s,updated_at=UTC_TIMESTAMP() WHERE id=%s", (status, ticket_id))
             conn.commit()
+            return {"ticket_id": int(ticket["id"]), "ticket_number": int(ticket["ticket_number"]), "user_id": int(ticket["user_id"]), "status": status}
 
 
 class RejectReasonModal(discord.ui.Modal):
@@ -631,13 +646,17 @@ class SupportReviewView(discord.ui.View):
     async def _resolve(self, interaction: discord.Interaction) -> None:
         if not self.bridge.is_staff(interaction):
             await interaction.response.send_message("❌ Нет доступа.", ephemeral=True); return
-        await asyncio.to_thread(self.bridge.db.set_support_status, self.ticket_id, "resolved")
+        result = await asyncio.to_thread(self.bridge.db.set_support_status, self.ticket_id, "resolved")
+        if result:
+            await self.bridge.push_support_event(result["user_id"], {"event_type":"support.status","ticket_id":result["ticket_id"],"ticket_number":result["ticket_number"],"status":"resolved"})
         await interaction.response.send_message("✅ Тикет отмечен решённым на сайте.", ephemeral=True)
 
     async def _close(self, interaction: discord.Interaction) -> None:
         if not self.bridge.is_staff(interaction):
             await interaction.response.send_message("❌ Нет доступа.", ephemeral=True); return
-        await asyncio.to_thread(self.bridge.db.set_support_status, self.ticket_id, "closed")
+        result = await asyncio.to_thread(self.bridge.db.set_support_status, self.ticket_id, "closed")
+        if result:
+            await self.bridge.push_support_event(result["user_id"], {"event_type":"support.status","ticket_id":result["ticket_id"],"ticket_number":result["ticket_number"],"status":"closed"})
         await interaction.response.send_message("🔒 Тикет закрыт на сайте.", ephemeral=True)
         if isinstance(interaction.channel, discord.Thread):
             try:
@@ -674,6 +693,9 @@ class WebsiteBridge(commands.Cog):
             log.exception("Website bridge cannot connect to MySQL; bot continues without web bridge.")
             return
         self.poll_outbox.start()
+        realtime = getattr(self.bot, "realtime_server", None)
+        if realtime is not None and hasattr(realtime, "set_outbox_wakeup"):
+            realtime.set_outbox_wakeup(self.drain_outbox)
         log.info("Website bridge enabled: %s:%s/%s", self.config.host, self.config.port, self.config.database)
 
     def cog_unload(self) -> None:
@@ -694,6 +716,15 @@ class WebsiteBridge(commands.Cog):
             allowed = set(state.roles.get("support_staff", [])) if state else set()
             return any(role.id in allowed for role in interaction.user.roles)
         return False
+
+    async def push_support_event(self, user_id: int, event: dict[str, Any]) -> None:
+        realtime = getattr(self.bot, "realtime_server", None)
+        if realtime is None or not getattr(realtime, "started", False):
+            return
+        try:
+            await realtime.send_to_user(user_id, {"type": "support.event", "event": event})
+        except Exception:
+            log.debug("Support realtime push failed for user_id=%s", user_id, exc_info=True)
 
     async def review_channel(self, guild: discord.Guild, app_type: str) -> discord.TextChannel | None:
         state = await self.state_for_guild(guild)
@@ -744,20 +775,29 @@ class WebsiteBridge(commands.Cog):
         except (TypeError, json.JSONDecodeError):
             return {}
 
-    @tasks.loop(seconds=4.0)
-    async def poll_outbox(self) -> None:
+    async def drain_outbox(self, max_events: int = 25) -> None:
+        if not self.config.ready or not self.bot.is_ready():
+            return
         if not self._rehydrated:
             await self.rehydrate_views()
             self._rehydrated = True
-        row = await asyncio.to_thread(self.db.claim_outbox)
-        if not row:
-            return
-        try:
-            message_id = await self.process_outbox(row)
-            await asyncio.to_thread(self.db.mark_outbox_sent, int(row["id"]), message_id)
-        except Exception as exc:
-            log.exception("Website outbox event %s failed", row.get("id"))
-            await asyncio.to_thread(self.db.mark_outbox_retry, int(row["id"]), f"{type(exc).__name__}: {exc}")
+        for _ in range(max(1, min(max_events, 100))):
+            row = await asyncio.to_thread(self.db.claim_outbox)
+            if not row:
+                return
+            try:
+                message_id = await self.process_outbox(row)
+                await asyncio.to_thread(self.db.mark_outbox_sent, int(row["id"]), message_id)
+            except Exception as exc:
+                log.exception("Website outbox event %s failed", row.get("id"))
+                await asyncio.to_thread(self.db.mark_outbox_retry, int(row["id"]), f"{type(exc).__name__}: {exc}")
+                return
+
+    @tasks.loop(seconds=30.0)
+    async def poll_outbox(self) -> None:
+        # Safety net only. Normal website events wake this bridge immediately via
+        # the authenticated internal realtime endpoint.
+        await self.drain_outbox()
 
     @poll_outbox.before_loop
     async def before_poll(self) -> None:
@@ -770,12 +810,6 @@ class WebsiteBridge(commands.Cog):
                 mid = str(row.get("discord_message_id") or "")
                 if mid.isdigit():
                     self.bot.add_view(WebsiteApplicationReviewView(self, int(row["id"])), message_id=int(mid))
-
-            public_rows = await asyncio.to_thread(self.db.pending_public_application_messages)
-            for row in public_rows:
-                mid = str(row.get("discord_message_id") or "")
-                if mid.isdigit():
-                    self.bot.add_view(WebsiteApplicationReviewView(self, int(row["id"]), public=True), message_id=int(mid))
 
             # Support buttons use unique custom_id values, so restoring the persistent
             # views globally is sufficient even when the root Discord message id was
@@ -792,7 +826,8 @@ class WebsiteBridge(commands.Cog):
         if event == "application.created":
             return await self.send_application(payload)
         if event == "public_application.created":
-            return await self.send_public_application(payload)
+            log.info("Deprecated website application event %s ignored: applications are Discord-only", row.get("id"))
+            return None
         if event == "support.created":
             return await self.send_support_created(payload)
         if event == "support.message":
@@ -954,18 +989,25 @@ class WebsiteBridge(commands.Cog):
         if not body:
             return
         try:
-            ok, ticket_id, ticket_number = await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 self.db.add_staff_support_message,
                 message.channel.id,
                 message.author.id,
                 body,
             )
-            if ok:
+            if result:
+                await self.push_support_event(result["user_id"], {
+                    "event_type": "support.message",
+                    "ticket_id": result["ticket_id"],
+                    "ticket_number": result["ticket_number"],
+                    "status": result["status"],
+                    "message": {"id": result["message_id"], "sender_type": "staff", "body": result["body"]},
+                })
                 try:
                     await message.add_reaction("🌐")
                 except discord.HTTPException:
                     pass
-                log.info("Support reply #%s relayed to website ticket %s", message.id, ticket_number)
+                log.info("Support reply #%s relayed to website ticket %s", message.id, result["ticket_number"])
         except Exception:
             log.exception("Could not relay Discord support reply to website")
 

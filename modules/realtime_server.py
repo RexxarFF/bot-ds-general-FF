@@ -164,6 +164,7 @@ class FunFernusRealtimeServer:
         self._started = False
         self._stopping = False
         self._owns_runner = False
+        self._outbox_wakeup = None
 
     @property
     def enabled(self) -> bool:
@@ -358,6 +359,16 @@ class FunFernusRealtimeServer:
             self._unregister(connection)
         return delivered
 
+    async def send_to_user(self, user_id: int, packet: dict[str, Any]) -> int:
+        """Best-effort push for trusted modules in the same bot process."""
+        outgoing = dict(packet)
+        outgoing.setdefault("server_time", int(time.time() * 1000))
+        return await self._send_to_user(user_id, outgoing)
+
+    def set_outbox_wakeup(self, callback: Any) -> None:
+        """Register an async callback used to drain the website Discord outbox."""
+        self._outbox_wakeup = callback
+
     async def _fanout(self, recipients: Any, packet: dict[str, Any]) -> int:
         if not isinstance(recipients, list):
             return 0
@@ -385,6 +396,17 @@ class FunFernusRealtimeServer:
         kind = str(payload.get("kind") or "")
         now_ms = int(time.time() * 1000)
 
+        if kind == "discord.wakeup":
+            callback = self._outbox_wakeup
+            if callback is not None:
+                try:
+                    result = callback()
+                    if asyncio.iscoroutine(result):
+                        asyncio.create_task(result)
+                except Exception:
+                    log.debug("Discord outbox wakeup callback failed", exc_info=True)
+            return web.json_response({"ok": True}, headers={"Cache-Control": "no-store"})
+
         if kind == "messenger.batch":
             deliveries = payload.get("deliveries")
             if not isinstance(deliveries, list) or not deliveries or len(deliveries) > self.MAX_BATCH_DELIVERIES:
@@ -400,18 +422,18 @@ class FunFernusRealtimeServer:
                 packet = delivery.get("packet")
                 if user_id <= 0 or not isinstance(packet, dict):
                     continue
-                if str(packet.get("type") or "") not in {"messenger.event", "notification"}:
+                if str(packet.get("type") or "") not in {"messenger.event", "notification", "support.event"}:
                     continue
                 outgoing = dict(packet)
                 outgoing["server_time"] = now_ms
                 delivered_sockets += await self._send_to_user(user_id, outgoing)
             return web.json_response({"ok": True, "delivered_sockets": delivered_sockets}, headers={"Cache-Control": "no-store"})
 
-        if kind not in {"messenger.event", "messenger.typing", "notification"}:
+        if kind not in {"messenger.event", "messenger.typing", "notification", "support.event"}:
             return web.json_response({"ok": False, "error": "invalid_kind"}, status=422)
 
         packet: dict[str, Any] = {"type": kind, "server_time": now_ms}
-        if kind == "messenger.event":
+        if kind in {"messenger.event", "support.event"}:
             packet["event"] = payload.get("event")
         elif kind == "messenger.typing":
             try:
