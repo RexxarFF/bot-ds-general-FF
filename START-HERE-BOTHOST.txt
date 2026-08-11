@@ -6,7 +6,7 @@ FUNFERNUS BOT — BOTHOST V3
 При СОЗДАНИИ/ПЕРЕСОЗДАНИИ бота в Bothost:
 1) Использовать домен: ВКЛ
 2) Порт веб-приложения: 3000
-3) Кастомный домен: оставь пустым для домена Bothost или укажи полный валидный домен
+3) Кастомный домен: funfernus-realtime
 4) Главный файл: main.py
 5) Использовать собственный Dockerfile: ВКЛ (ОБЯЗАТЕЛЬНО)
 
@@ -17,15 +17,15 @@ FUNFERNUS BOT — BOTHOST V3
 
 Переменные:
 - используй содержимое .env.example как один общий набор переменных Bothost;
-- REALTIME_SECRET в шаблонах является placeholder: перед запуском сгенерируй один секрет и укажи одинаковое значение в .env бота и приватном realtime.php сайта;
+- секрет REALTIME_SECRET уже согласован с приложенным realtime.php;
 - заполни DISCORD_TOKEN, WEB_DB_USER, WEB_DB_PASSWORD, RCON_HOST, RCON_PASSWORD.
 
 Сайт:
 - положи realtime.php в приватный конфиг сайта вместо старого realtime.php.
 
 Проверки после запуска:
-https://YOUR-BOTHOST-DOMAIN/health
-wss://YOUR-BOTHOST-DOMAIN/ws
+https://funfernus-realtime.bothost.tech/health
+wss://funfernus-realtime.bothost.tech/ws
 
 В логах должны быть:
 - Website bridge enabled
@@ -38,4 +38,4 @@ wss://YOUR-BOTHOST-DOMAIN/ws
 - конфликт порта теперь логируется понятным сообщением и не валит Discord;
 - один общий .env.example;
 - убраны старые Procfile/start/runtime/realtime-конфиги, чтобы не было путаницы;
-- домен в шаблонах оставлен как YOUR-BOTHOST-DOMAIN: замени его на фактический домен, выданный Bothost.
+- готовые ссылки funfernus-realtime.bothost.tech уже прописаны.

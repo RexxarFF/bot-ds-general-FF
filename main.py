@@ -2215,17 +2215,14 @@ async def on_ready() -> None:
             unified_state = await bot.unified_store.load_or_create(guild)
             if unified_state.channels.get("support_panel"):
                 await publish_support_panel(bot, bot.unified_store, guild, unified_state)
-                await asyncio.sleep(0.8)
             if unified_state.channels.get("government_panel") and unified_state.channels.get("government_review"):
                 await publish_government_panel(bot, bot.unified_store, guild, unified_state)
-                await asyncio.sleep(0.8)
             # При первом запуске после обновления эта операция также
             # переписывает старые публичные карточки реестра без внутренних
             # ID и обновляет подписи к скриншотам. Если настройка городов ещё
             # не завершена, publish_city_panels просто не публикует панели.
             if unified_state.channels.get("city_registry"):
                 await publish_city_panels(bot, bot.unified_store, guild, unified_state)
-                await asyncio.sleep(0.8)
         except Exception:
             log.exception("Не удалось загрузить объединённое хранилище для сервера %s", guild.id)
 
@@ -2417,14 +2414,15 @@ async def rcon_console(interaction: discord.Interaction) -> None:
 )
 @app_commands.guild_only()
 async def rcon_test(interaction: discord.Interaction) -> None:
-    # Discord invalidates an interaction that is not acknowledged quickly enough.
-    # Defer before any checks/work; require_staff will use followup when deferred.
+    # Acknowledge immediately: Discord invalidates an interaction that is not
+    # acknowledged quickly enough. Permission/RCON work happens afterwards.
     try:
         await interaction.response.defer(ephemeral=True, thinking=True)
     except discord.NotFound:
-        log.warning("/rcon_test interaction expired before acknowledgement (user_id=%s)", interaction.user.id)
+        log.warning("RCON test interaction expired before acknowledgement: user=%s", interaction.user.id)
         return
-    if not await require_staff(interaction):
+    if not is_staff(interaction):
+        await interaction.followup.send(no_access_text(interaction), ephemeral=True)
         return
     ok, response = await run_rcon("list")
     await interaction.followup.send(

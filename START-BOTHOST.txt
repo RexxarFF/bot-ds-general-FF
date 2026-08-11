@@ -11,7 +11,7 @@ Bothost при обычной автосборке с включённым до�
 2) При создании/редактировании Bothost:
    - Использовать домен: ВКЛ
    - Порт веб-приложения: 8000
-   - Кастомный домен: не указывай короткое имя; используй домен, который реально выдал Bothost, либо корректный полный custom domain
+   - Кастомный домен: funfernus-realtime (или уже созданный домен)
    - Использовать собственный Dockerfile: ВКЛ ОБЯЗАТЕЛЬНО
    - Главный файл можно оставить main.py; Dockerfile запускает python main.py сам.
 3) Заполни ОДИН файл .env или перенеси те же переменные в вкладку «Переменные» Bothost.
@@ -21,8 +21,8 @@ Bothost при обычной автосборке с включённым до�
 
 ПРОВЕРКИ
 Discord: бот должен стать Online.
-HTTP: https://YOUR-BOTHOST-DOMAIN/health
-WebSocket: wss://YOUR-BOTHOST-DOMAIN/ws
+HTTP: https://funfernus-realtime.bothost.tech/health
+WebSocket: wss://funfernus-realtime.bothost.tech/ws
 В Discord: /realtime_status
 
 ВАЖНО

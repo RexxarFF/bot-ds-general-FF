@@ -5,7 +5,7 @@ return [
     'enabled' => true,
     'public_url' => 'wss://YOUR-SUBDOMAIN.bothost.tech/ws',
     'internal_url' => 'https://YOUR-SUBDOMAIN.bothost.tech/internal/publish',
-    'secret' => 'PASTE_NEW_64_HEX_REALTIME_SECRET_HERE',
+    'secret' => 'PASTE_SAME_REALTIME_SECRET',
     'ticket_ttl' => 120,
     'publish_timeout_ms' => 1000,
 ];
