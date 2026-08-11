@@ -133,6 +133,145 @@ class WebsiteDatabase:
                 )
             conn.commit()
 
+    def claim_scheduled_message(self) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM scheduled_messages WHERE status='pending' AND send_at<=UTC_TIMESTAMP() "
+                    "ORDER BY send_at ASC,id ASC LIMIT 1 FOR UPDATE"
+                )
+                row = cur.fetchone()
+                if not row:
+                    conn.rollback()
+                    return None
+                scheduled_id = int(row["id"])
+                cur.execute(
+                    "UPDATE scheduled_messages SET status='processing',attempts=attempts+1,updated_at=UTC_TIMESTAMP() "
+                    "WHERE id=%s AND status='pending'",
+                    (scheduled_id,),
+                )
+                if cur.rowcount != 1:
+                    conn.rollback()
+                    return None
+                conn.commit()
+                return {"id": scheduled_id}
+
+    def deliver_scheduled_message(self, scheduled_id: int) -> dict[str, Any]:
+        with self.connect() as conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT sm.*,c.conversation_type,c.owner_user_id,c.posting_mode,c.slow_mode_seconds,c.deleted_at,"
+                        "cm.member_role,cm.hidden FROM scheduled_messages sm "
+                        "JOIN conversations c ON c.id=sm.conversation_id "
+                        "LEFT JOIN conversation_members cm ON cm.conversation_id=sm.conversation_id AND cm.user_id=sm.sender_user_id "
+                        "WHERE sm.id=%s FOR UPDATE",
+                        (scheduled_id,),
+                    )
+                    row = cur.fetchone()
+                    if not row or str(row.get("status")) != "processing":
+                        conn.rollback()
+                        return {"status": "skip"}
+                    cid = int(row["conversation_id"])
+                    sender = int(row["sender_user_id"])
+                    if row.get("deleted_at") is not None or row.get("member_role") is None or int(row.get("hidden") or 0):
+                        cur.execute("UPDATE scheduled_messages SET status='failed',last_error=%s WHERE id=%s", ("Чат больше недоступен.", scheduled_id))
+                        conn.commit()
+                        return {"status": "failed", "error": "conversation_unavailable"}
+
+                    role = str(row.get("member_role") or "member")
+                    mode = str(row.get("posting_mode") or "members")
+                    owner = int(row.get("owner_user_id") or 0) == sender or role in {"owner", "admin"}
+                    cur.execute(
+                        "SELECT u.is_admin,EXISTS(SELECT 1 FROM user_site_roles ur JOIN site_role_permissions rp ON rp.role_id=ur.role_id "
+                        "WHERE ur.user_id=u.id AND rp.allowed=1 AND rp.permission_key IN ('messages.moderate','*')) can_moderate "
+                        "FROM users u WHERE u.id=%s LIMIT 1",
+                        (sender,),
+                    )
+                    rights = cur.fetchone() or {}
+                    moderator = bool(rights.get("is_admin") or rights.get("can_moderate"))
+                    if mode == "read_only" or (str(row.get("conversation_type")) == "channel" and mode in {"owner_admins", "admins"} and not (owner or moderator)):
+                        cur.execute("UPDATE scheduled_messages SET status='failed',last_error=%s WHERE id=%s", ("Право публикации изменилось.", scheduled_id))
+                        conn.commit()
+                        return {"status": "failed", "error": "send_forbidden"}
+
+                    if str(row.get("conversation_type")) == "direct":
+                        cur.execute("SELECT user_id FROM conversation_members WHERE conversation_id=%s AND user_id<>%s LIMIT 1", (cid, sender))
+                        peer_row = cur.fetchone()
+                        peer = int(peer_row["user_id"]) if peer_row else 0
+                        if not peer:
+                            cur.execute("UPDATE scheduled_messages SET status='failed',last_error=%s WHERE id=%s", ("Получатель недоступен.", scheduled_id))
+                            conn.commit()
+                            return {"status": "failed", "error": "peer_unavailable"}
+                        cur.execute("SELECT 1 FROM blocks WHERE (blocker_id=%s AND blocked_id=%s) OR (blocker_id=%s AND blocked_id=%s) LIMIT 1", (sender, peer, peer, sender))
+                        if cur.fetchone():
+                            cur.execute("UPDATE scheduled_messages SET status='failed',last_error=%s WHERE id=%s", ("Переписка заблокирована.", scheduled_id))
+                            conn.commit()
+                            return {"status": "failed", "error": "blocked"}
+
+                    slow = max(0, min(300, int(row.get("slow_mode_seconds") or 0)))
+                    if slow and not (owner or moderator):
+                        cur.execute(
+                            "SELECT GREATEST(0,%s-TIMESTAMPDIFF(SECOND,created_at,UTC_TIMESTAMP())) retry_after "
+                            "FROM messages WHERE conversation_id=%s AND sender_user_id=%s AND deleted_at IS NULL ORDER BY id DESC LIMIT 1",
+                            (slow, cid, sender),
+                        )
+                        retry_row = cur.fetchone() or {}
+                        retry_after = int(retry_row.get("retry_after") or 0)
+                        if retry_after > 0:
+                            cur.execute(
+                                "UPDATE scheduled_messages SET status='pending',send_at=DATE_ADD(UTC_TIMESTAMP(),INTERVAL %s SECOND),last_error=NULL WHERE id=%s",
+                                (retry_after, scheduled_id),
+                            )
+                            conn.commit()
+                            return {"status": "rescheduled", "retry_after": retry_after}
+
+                    cur.execute(
+                        "INSERT INTO messages(conversation_id,sender_user_id,client_message_id,message_type,body,reply_to_message_id,media_position,moderation_status) "
+                        "VALUES(%s,%s,%s,'text',%s,%s,'top',%s)",
+                        (cid, sender, row["client_message_id"], row["body"], row.get("reply_to_message_id"), row.get("moderation_status") or "approved"),
+                    )
+                    message_id = int(cur.lastrowid)
+                    cur.execute(
+                        "INSERT IGNORE INTO message_receipts(message_id,user_id) SELECT %s,user_id FROM conversation_members "
+                        "WHERE conversation_id=%s AND user_id<>%s AND hidden=0",
+                        (message_id, cid, sender),
+                    )
+                    cur.execute("UPDATE conversations SET last_message_id=%s,last_message_at=UTC_TIMESTAMP(),updated_at=UTC_TIMESTAMP() WHERE id=%s", (message_id, cid))
+                    cur.execute("UPDATE conversation_members SET hidden=0 WHERE conversation_id=%s", (cid,))
+                    event_payload = json.dumps({"client_message_id": row["client_message_id"], "scheduled_id": scheduled_id}, ensure_ascii=False, separators=(",", ":"))
+                    cur.execute(
+                        "INSERT INTO messenger_events(conversation_id,actor_user_id,event_type,message_id,payload_json) VALUES(%s,%s,'message.new',%s,%s)",
+                        (cid, sender, message_id, event_payload),
+                    )
+                    event_id = int(cur.lastrowid)
+                    cur.execute("UPDATE scheduled_messages SET status='sent',sent_message_id=%s,last_error=NULL,updated_at=UTC_TIMESTAMP() WHERE id=%s", (message_id, scheduled_id))
+                    cur.execute("SELECT user_id FROM conversation_members WHERE conversation_id=%s AND hidden=0", (cid,))
+                    recipients = [int(x["user_id"]) for x in cur.fetchall() if int(x.get("user_id") or 0) > 0]
+                conn.commit()
+                return {
+                    "status": "sent",
+                    "recipients": recipients,
+                    "event": {
+                        "id": event_id,
+                        "conversation_id": cid,
+                        "actor_user_id": sender,
+                        "event_type": "message.new",
+                        "message_id": message_id,
+                        "payload": {"client_message_id": row["client_message_id"], "scheduled_id": scheduled_id},
+                    },
+                }
+            except Exception as exc:
+                conn.rollback()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE scheduled_messages SET status=IF(attempts>=5,'failed','pending'),last_error=%s,"
+                        "send_at=IF(attempts>=5,send_at,DATE_ADD(UTC_TIMESTAMP(),INTERVAL 30 SECOND)),updated_at=UTC_TIMESTAMP() WHERE id=%s",
+                        (f"{type(exc).__name__}: {exc}"[:500], scheduled_id),
+                    )
+                conn.commit()
+                raise
+
     def pending_application_messages(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -325,7 +464,29 @@ class WebsiteDatabase:
                             "UPDATE businesses SET plugin_business_id=%s,bank_account_id=%s,name=%s,description=%s,place_text=%s,planned_coordinates=%s,status='active',updated_at=UTC_TIMESTAMP() WHERE id=%s",
                             (plugin_id, bank_account_id, name, description, place_text, coordinates, business_id),
                         )
-                        result = f"Бизнес «{name}» одобрен и активирован. Плагин подхватит его из общей БД."
+                        # Messenger uses the same business entity. Keep approval backward-compatible:
+                        # older DBs without entity_id still approve the business, while migrated DBs
+                        # receive the conversation immediately instead of waiting for the first page visit.
+                        cur.execute("SHOW COLUMNS FROM conversations LIKE 'entity_id'")
+                        if cur.fetchone():
+                            cur.execute("SELECT avatar_path,banner_path FROM businesses WHERE id=%s LIMIT 1", (business_id,))
+                            appearance = cur.fetchone() or {}
+                            cur.execute(
+                                "INSERT INTO conversations(conversation_type,entity_id,title,owner_user_id,slug,description,avatar_path,banner_path,is_public,posting_mode,join_mode,request_status) "
+                                "VALUES('business',%s,%s,%s,%s,%s,%s,%s,0,'members','invite','accepted') "
+                                "ON DUPLICATE KEY UPDATE title=VALUES(title),owner_user_id=VALUES(owner_user_id),description=VALUES(description),avatar_path=VALUES(avatar_path),banner_path=VALUES(banner_path),deleted_at=NULL,updated_at=UTC_TIMESTAMP()",
+                                (business_id, name, row["user_id"], f"business-{business_id}", description, appearance.get("avatar_path"), appearance.get("banner_path")),
+                            )
+                            cur.execute("SELECT id FROM conversations WHERE conversation_type='business' AND entity_id=%s LIMIT 1", (business_id,))
+                            conversation = cur.fetchone()
+                            if conversation:
+                                conversation_id = int(conversation["id"])
+                                cur.execute(
+                                    "INSERT INTO conversation_members(conversation_id,user_id,member_role,pinned) VALUES(%s,%s,'owner',1) "
+                                    "ON DUPLICATE KEY UPDATE member_role='owner',hidden=0,archived_at=NULL",
+                                    (conversation_id, row["user_id"]),
+                                )
+                        result = f"Бизнес «{name}» одобрен и активирован. Плагин и мессенджер подхватят его из общей БД."
 
                     cur.execute(
                         "UPDATE applications SET status='approved',review_comment=%s,reviewed_by_discord_id=%s,"
@@ -392,7 +553,7 @@ class WebsiteDatabase:
                                 if cur.rowcount != 1:
                                     cur.execute("UPDATE bank_accounts SET balance=balance-%s WHERE id=%s", (fee_amount, fee_account_id))
                                 else:
-                                    extra_note = f" Возвращено {fee_amount} АР на тот же счёт, с которого была оплачена заявка."
+                                    extra_note = f"  Возвращено {fee_amount} АР на основной счёт."
                     cur.execute(
                         "UPDATE applications SET status='rejected',review_comment=%s,reviewed_by_discord_id=%s,reviewed_at=UTC_TIMESTAMP() WHERE id=%s",
                         (reason, str(reviewer_id), app_id),
@@ -475,10 +636,10 @@ class WebsiteDatabase:
                 )
             conn.commit()
 
-    def add_staff_support_message(self, thread_id: int, discord_id: int, body: str) -> tuple[bool, int, int, int]:
+    def add_staff_support_message(self, thread_id: int, discord_id: int, body: str) -> tuple[bool, int, int]:
         body = body.strip()[:8000]
         if not body:
-            return False, 0, 0, 0
+            return False, 0, 0
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -486,8 +647,8 @@ class WebsiteDatabase:
                     (str(thread_id),),
                 )
                 ticket = cur.fetchone()
-                if not ticket or ticket["status"] in {"resolved", "closed"}:
-                    conn.rollback(); return False, 0, 0, 0
+                if not ticket or ticket["status"] == "closed":
+                    conn.rollback(); return False, 0, 0
                 cur.execute(
                     "INSERT INTO support_messages(ticket_id,sender_type,sender_discord_id,body) VALUES(%s,'staff',%s,%s)",
                     (ticket["id"], str(discord_id), body),
@@ -499,7 +660,7 @@ class WebsiteDatabase:
                     (ticket["user_id"], body[:900], f"/support.php?ticket={ticket['id']}"),
                 )
             conn.commit()
-            return True, int(ticket["id"]), int(ticket["ticket_number"]), int(ticket["user_id"])
+            return True, int(ticket["id"]), int(ticket["ticket_number"])
 
     def set_support_status(self, ticket_id: int, status: str) -> None:
         if status not in {"waiting_staff", "waiting_user", "in_progress", "resolved", "closed"}:
@@ -539,15 +700,12 @@ class RejectReasonModal(discord.ui.Modal):
                 str(self.reason.value),
             )
         else:
-            row = await asyncio.to_thread(self.bridge.db.get_application, self.app_id)
             ok, text = await asyncio.to_thread(
                 self.bridge.db.reject_application,
                 self.app_id,
                 interaction.user.id,
                 str(self.reason.value),
             )
-            if ok and row:
-                await self.bridge.push_site_notification(int(row['user_id']), 'Заявка отклонена', text, '/bank.php' if str(row.get('application_type'))=='business' else '/cities.php')
         if ok:
             await self.bridge.mark_review_message(self.source_message, False, text)
         await interaction.followup.send(("✅ " if ok else "❌ ") + text, ephemeral=True)
@@ -604,13 +762,11 @@ class WebsiteApplicationReviewView(discord.ui.View):
                 ok_rcon, rcon_text = await self.bridge.run_rcon(f"noblewl add name {row['minecraft_username']}")
                 if not ok_rcon:
                     await interaction.followup.send("❌ Whitelist не изменён: " + rcon_text, ephemeral=True); return
-            ok, text, app_type = await asyncio.to_thread(
+            ok, text, _ = await asyncio.to_thread(
                 self.bridge.db.approve_application,
                 self.app_id,
                 interaction.user.id,
             )
-            if ok:
-                await self.bridge.push_site_notification(int(row['user_id']), 'Заявка одобрена', text, '/bank.php' if app_type=='business' else '/cities.php')
         if ok:
             await self.bridge.mark_review_message(interaction.message, True, text)
         await interaction.followup.send(("✅ " if ok else "❌ ") + text, ephemeral=True)
@@ -636,17 +792,13 @@ class SupportReviewView(discord.ui.View):
     async def _resolve(self, interaction: discord.Interaction) -> None:
         if not self.bridge.is_staff(interaction):
             await interaction.response.send_message("❌ Нет доступа.", ephemeral=True); return
-        ticket=await asyncio.to_thread(self.bridge.db.get_support_ticket,self.ticket_id)
         await asyncio.to_thread(self.bridge.db.set_support_status, self.ticket_id, "resolved")
-        if ticket: await self.bridge.push_site_notification(int(ticket['user_id']),'Обращение решено','Поддержка отметила обращение решённым.',f'/support.php?ticket={self.ticket_id}')
         await interaction.response.send_message("✅ Тикет отмечен решённым на сайте.", ephemeral=True)
 
     async def _close(self, interaction: discord.Interaction) -> None:
         if not self.bridge.is_staff(interaction):
             await interaction.response.send_message("❌ Нет доступа.", ephemeral=True); return
-        ticket=await asyncio.to_thread(self.bridge.db.get_support_ticket,self.ticket_id)
         await asyncio.to_thread(self.bridge.db.set_support_status, self.ticket_id, "closed")
-        if ticket: await self.bridge.push_site_notification(int(ticket['user_id']),'Обращение закрыто','Техподдержка закрыла это обращение.',f'/support.php?ticket={self.ticket_id}')
         await interaction.response.send_message("🔒 Тикет закрыт на сайте.", ephemeral=True)
         if isinstance(interaction.channel, discord.Thread):
             try:
@@ -672,6 +824,7 @@ class WebsiteBridge(commands.Cog):
         self.public_url = _env("WEB_PUBLIC_URL", "https://funfernus.ru").rstrip("/")
         self.guild_id = _env_int("GUILD_ID", 0)
         self._rehydrated = False
+        self._scheduled_schema_warned = False
 
     async def cog_load(self) -> None:
         if not self.config.ready:
@@ -683,11 +836,14 @@ class WebsiteBridge(commands.Cog):
             log.exception("Website bridge cannot connect to MySQL; bot continues without web bridge.")
             return
         self.poll_outbox.start()
+        self.poll_scheduled.start()
         log.info("Website bridge enabled: %s:%s/%s", self.config.host, self.config.port, self.config.database)
 
     def cog_unload(self) -> None:
         if self.poll_outbox.is_running():
             self.poll_outbox.cancel()
+        if self.poll_scheduled.is_running():
+            self.poll_scheduled.cancel()
 
     async def state_for_guild(self, guild: discord.Guild) -> UnifiedState:
         return self.store.get(guild.id) or await self.store.load_or_create(guild)
@@ -738,19 +894,6 @@ class WebsiteBridge(commands.Cog):
                 return None
         return await self.review_channel(guild, "support")
 
-    async def push_site_notification(self, user_id: int, title: str, body: str = "", link_url: str = "/notifications.php") -> None:
-        server = getattr(self.bot, "realtime_server", None)
-        if server is None or not getattr(server, "started", False):
-            return
-        try:
-            await server.publish_notification(int(user_id), {
-                "title": str(title)[:180],
-                "body": str(body)[:1200],
-                "link_url": str(link_url)[:500],
-            })
-        except Exception:
-            log.warning("Realtime notification publish failed for website user %s", user_id, exc_info=True)
-
     async def target_guild(self) -> discord.Guild | None:
         if self.guild_id:
             return self.bot.get_guild(self.guild_id)
@@ -780,6 +923,32 @@ class WebsiteBridge(commands.Cog):
         except Exception as exc:
             log.exception("Website outbox event %s failed", row.get("id"))
             await asyncio.to_thread(self.db.mark_outbox_retry, int(row["id"]), f"{type(exc).__name__}: {exc}")
+
+    @tasks.loop(seconds=2.0)
+    async def poll_scheduled(self) -> None:
+        try:
+            row = await asyncio.to_thread(self.db.claim_scheduled_message)
+            self._scheduled_schema_warned = False
+        except Exception as exc:
+            if not self._scheduled_schema_warned:
+                log.warning("Scheduled messenger worker is waiting for site migration: %s", exc)
+                self._scheduled_schema_warned = True
+            return
+        if not row:
+            return
+        try:
+            result = await asyncio.to_thread(self.db.deliver_scheduled_message, int(row["id"]))
+            if result.get("status") == "sent":
+                realtime = getattr(self.bot, "realtime_server", None)
+                if realtime is not None and getattr(realtime, "started", False):
+                    await realtime.publish_messenger_event(result.get("recipients", []), result.get("event", {}))
+                log.info("Scheduled messenger message %s sent as message_id=%s", row["id"], result.get("event", {}).get("message_id"))
+        except Exception:
+            log.exception("Scheduled messenger message %s failed", row.get("id"))
+
+    @poll_scheduled.before_loop
+    async def before_scheduled(self) -> None:
+        await self.bot.wait_until_ready()
 
     @poll_outbox.before_loop
     async def before_poll(self) -> None:
@@ -976,14 +1145,13 @@ class WebsiteBridge(commands.Cog):
         if not body:
             return
         try:
-            ok, ticket_id, ticket_number, user_id = await asyncio.to_thread(
+            ok, ticket_id, ticket_number = await asyncio.to_thread(
                 self.db.add_staff_support_message,
                 message.channel.id,
                 message.author.id,
                 body,
             )
             if ok:
-                await self.push_site_notification(user_id, "Новый ответ техподдержки", body, f"/support.php?ticket={ticket_id}")
                 try:
                     await message.add_reaction("🌐")
                 except discord.HTTPException:

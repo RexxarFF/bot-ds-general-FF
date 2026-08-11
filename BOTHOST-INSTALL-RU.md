@@ -22,7 +22,7 @@
 - RCON — только если нужен;
 - `REALTIME_PUBLIC_URL` — адрес WebSocket-домена Bothost.
 
-`REALTIME_SECRET` уже сгенерирован. Он должен совпадать с секретом в `realtime.php.bothost.ready`.
+`REALTIME_SECRET` в шаблоне намеренно НЕ содержит рабочего секрета. Сгенерируй его командой `python generate_realtime_secret.py` или любым криптографически стойким способом и укажи ОДНО И ТО ЖЕ значение в `.env` бота и приватном `realtime.php` сайта.
 
 ВАЖНО: `.env` нельзя публиковать в GitHub.
 
@@ -64,7 +64,7 @@ Fallback `REALTIME_PORT=8000` используется только если `PO
 - `public_url` → `wss://YOUR-SUBDOMAIN.bothost.tech/ws`
 - `internal_url` → `https://YOUR-SUBDOMAIN.bothost.tech/internal/publish`
 
-Секрет в этом файле уже совпадает с `BOTHOST-READY.env`.
+В шаблоне стоит placeholder. Перед запуском укажи здесь тот же реальный `REALTIME_SECRET`, что и в `.env` бота. Сам realtime/WebSocket при этом остаётся включённым и работает через `/ws`.
 
 ## 6. Установи зависимости
 

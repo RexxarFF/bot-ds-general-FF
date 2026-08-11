@@ -22,5 +22,5 @@ Checks:
 - AST parse all Python files: OK
 - realtime /health smoke test: HTTP 200 OK
 - .env files in root: exactly 1 (.env)
-- public WSS: wss://funfernus-realtime.bothost.tech/ws
-- internal publish: https://funfernus-realtime.bothost.tech/internal/publish
+- public WSS: wss://YOUR-BOTHOST-DOMAIN/ws
+- internal publish: https://YOUR-BOTHOST-DOMAIN/internal/publish

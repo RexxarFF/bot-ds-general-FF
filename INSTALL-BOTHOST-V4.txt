@@ -13,7 +13,7 @@ FUNFERNUS BOT — BOTHOST V4
 -----------------
 Использовать домен: ВКЛ
 Порт веб-приложения: 3000
-Кастомный домен: funfernus-realtime
+Кастомный домен: оставь пустым для домена Bothost или укажи полный валидный домен
 Главный файл: main.py
 Использовать собственный Dockerfile: ВЫКЛ
 
@@ -49,12 +49,12 @@ RCON_TEST_MODE=true
   FUNFERNUS DISCORD BOT ЗАПУЩЕН
 
 Проверка браузером:
-https://funfernus-realtime.bothost.tech/health
+https://YOUR-BOTHOST-DOMAIN/health
 
 WebSocket:
-wss://funfernus-realtime.bothost.tech/ws
+wss://YOUR-BOTHOST-DOMAIN/ws
 
 Сайт -> publish:
-https://funfernus-realtime.bothost.tech/internal/publish
+https://YOUR-BOTHOST-DOMAIN/internal/publish
 
-Для сайта используй realtime.php из комплекта — его secret уже совпадает с ENV.
+Для сайта используй приватный realtime.php; укажи в нём тот же реальный REALTIME_SECRET, что и в ENV бота. В комплекте секрет намеренно не хранится.
